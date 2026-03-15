@@ -122,5 +122,50 @@ pub async fn init_db(url: &str) -> anyhow::Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS fetch_accounts (
+            id TEXT PRIMARY KEY,
+            protocol TEXT NOT NULL CHECK(protocol IN ('imap','pop3')),
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            tls INTEGER NOT NULL DEFAULT 1,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            local_recipient TEXT NOT NULL,
+            imap_mailbox TEXT NOT NULL DEFAULT 'INBOX',
+            poll_interval_secs INTEGER NOT NULL DEFAULT 300,
+            batch_size INTEGER NOT NULL DEFAULT 50,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_fetch_at TEXT,
+            last_fetch_status TEXT,
+            last_messages_fetched INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS seen_messages (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            remote_id TEXT NOT NULL,
+            seen_at TEXT NOT NULL,
+            UNIQUE(account_id, remote_id)
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_seen_messages_account ON seen_messages(account_id)",
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }

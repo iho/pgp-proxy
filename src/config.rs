@@ -9,6 +9,13 @@ pub struct Config {
     pub pop3: Pop3Config,
     pub web: WebConfig,
     pub database: DatabaseConfig,
+    pub fetch: FetchConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct FetchConfig {
+    pub enabled: bool,
+    pub poll_interval_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -82,6 +89,8 @@ impl Config {
             .set_default("pop3.enabled", true)?
             .set_default("web.listen_addr", "0.0.0.0:8080")?
             .set_default("database.url", "sqlite://pgp_proxy.db")?
+            .set_default("fetch.enabled", true)?
+            .set_default("fetch.poll_interval_secs", 300u64)?
             .build()?;
         Ok(cfg.try_deserialize()?)
     }

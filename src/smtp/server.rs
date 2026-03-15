@@ -848,7 +848,7 @@ fn extract_address(s: &str) -> String {
     }
 }
 
-fn extract_body(raw: &str) -> &str {
+pub fn extract_body(raw: &str) -> &str {
     if let Some(pos) = raw.find("\r\n\r\n") {
         return &raw[pos + 4..];
     }
@@ -858,7 +858,7 @@ fn extract_body(raw: &str) -> &str {
     raw
 }
 
-fn replace_body(raw: &str, new_body: &str) -> String {
+pub fn replace_body(raw: &str, new_body: &str) -> String {
     if let Some(pos) = raw.find("\r\n\r\n") {
         return format!("{}\r\n\r\n{}", &raw[..pos], new_body);
     }
@@ -868,7 +868,7 @@ fn replace_body(raw: &str, new_body: &str) -> String {
     new_body.to_string()
 }
 
-fn extract_header_from_raw(raw: &str, name: &str) -> Option<String> {
+pub fn extract_header_from_raw(raw: &str, name: &str) -> Option<String> {
     let (headers, _) = split_headers_body(raw);
     let name_lower = name.to_lowercase();
     for line in headers.lines() {

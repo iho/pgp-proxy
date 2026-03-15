@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod error;
+mod fetch;
 mod keys;
 mod mailbox;
 mod pgp_engine;
@@ -58,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
     let pool = Arc::new(pool);
     let config = Arc::new(cfg);
 
+    // Channel for triggering an immediate fetch poll from the web UI
+    let (fetch_trigger_tx, fetch_trigger_rx) = tokio::sync::mpsc::channel::<()>(4);
+
     // Spawn outbound SMTP server task
     let smtp_config = Arc::clone(&config);
     let smtp_pool = Arc::clone(&pool);
@@ -88,6 +92,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Spawn fetch poller (POP3/IMAP client)
+    if config.fetch.enabled {
+        let fetch_pool = Arc::clone(&pool);
+        let interval_secs = config.fetch.poll_interval_secs;
+        tokio::spawn(async move {
+            if let Err(e) =
+                fetch::poller::run_fetch_poller(fetch_pool, interval_secs, fetch_trigger_rx).await
+            {
+                eprintln!("Fetch poller error: {e}");
+            }
+        });
+        info!("Fetch poller started (interval: {}s)", config.fetch.poll_interval_secs);
+    } else {
+        drop(fetch_trigger_rx);
+        info!("Fetch poller disabled");
+    }
+
     // Spawn POP3 server task (if enabled)
     let pop3_handle = if config.pop3.enabled {
         let pop3_config = Arc::clone(&config);
@@ -108,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
     let web_addr = web_config.web.listen_addr.clone();
 
     let web_handle = tokio::spawn(async move {
-        let router = web::build_router(web_pool, web_config);
+        let router = web::build_router(web_pool, web_config, fetch_trigger_tx);
         let listener = match tokio::net::TcpListener::bind(&web_addr).await {
             Ok(l) => l,
             Err(e) => {

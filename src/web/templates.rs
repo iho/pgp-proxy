@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::fetch::account_store::FetchAccount;
 use crate::keys::KeyRecord;
 use crate::mailbox::MailMessage;
 use crate::policy::PolicyRecord;
@@ -93,6 +94,7 @@ fn layout(title: &str, content: Markup) -> Markup {
                             a class="nav-link" href="/users" { "Users" }
                             a class="nav-link" href="/mailbox" { "Mailbox" }
                             a class="nav-link" href="/queue" { "Queue" }
+                            a class="nav-link" href="/fetch" { "Fetch" }
                             a class="nav-link" href="/logs" { "Logs" }
                             a class="nav-link" href="/config" { "Config" }
                         }
@@ -711,6 +713,201 @@ pub fn queue_page(entries: &[QueueEntry]) -> Markup {
         (queue_table(entries))
     };
     layout("Queue", content)
+}
+
+// ── Fetch Accounts ─────────────────────────────────────────────────────────────
+
+fn fetch_status_badge(status: Option<&str>) -> Markup {
+    match status {
+        None => html! { span class="badge badge-muted" { "never" } },
+        Some(s) if s == "ok" => html! { span class="badge badge-success" { "ok" } },
+        Some(s) => html! { span class="badge badge-danger" title=(s) { "error" } },
+    }
+}
+
+pub fn fetch_accounts_table(accounts: &[FetchAccount]) -> Markup {
+    html! {
+        div class="table-wrap" id="fetch-accounts-table" {
+            table {
+                thead {
+                    tr {
+                        th { "Protocol" }
+                        th { "Host" }
+                        th { "Username" }
+                        th { "Delivers to" }
+                        th { "Interval" }
+                        th { "Status" }
+                        th { "Fetched" }
+                        th { "Last fetch" }
+                        th { "" }
+                    }
+                }
+                tbody {
+                    @for a in accounts {
+                        tr {
+                            td {
+                                span class="badge badge-info" { (a.protocol.to_uppercase()) }
+                                @if a.tls { span class="badge badge-success" style="margin-left:0.3rem" { "TLS" } }
+                            }
+                            td { code { (a.host) ":" (a.port) } }
+                            td { (a.username) }
+                            td { code { (a.local_recipient) } }
+                            td { small { (a.poll_interval_secs) "s" } }
+                            td {
+                                (fetch_status_badge(a.last_fetch_status.as_deref()))
+                                @if !a.enabled {
+                                    span class="badge badge-muted" style="margin-left:0.3rem" { "disabled" }
+                                }
+                            }
+                            td { small { (a.last_messages_fetched) " msgs" } }
+                            td { small class="text-muted" { (a.last_fetch_at.as_deref().unwrap_or("—")) } }
+                            td {
+                                button class="btn btn-sm"
+                                    style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);margin-right:0.3rem"
+                                    hx-post=(format!("/fetch/{}/toggle", a.id))
+                                    hx-target="#fetch-accounts-table"
+                                    hx-swap="outerHTML"
+                                {
+                                    @if a.enabled { "Disable" } @else { "Enable" }
+                                }
+                                (delete_btn(&format!("/fetch/{}", a.id), &format!("Delete fetch account {}?", a.username)))
+                            }
+                        }
+                    }
+                    @if accounts.is_empty() {
+                        tr { td colspan="9" class="empty-row" { "No fetch accounts configured yet." } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn fetch_accounts_page(accounts: &[FetchAccount]) -> Markup {
+    let content = html! {
+        div class="page-header" {
+            h1 class="page-title" { "Fetch Accounts" }
+            button class="btn btn-primary btn-sm"
+                hx-post="/fetch/poll"
+                hx-target="#poll-status"
+                hx-swap="innerHTML"
+            { "Poll Now" }
+        }
+        span id="poll-status" style="font-size:0.8rem;color:var(--text-muted)" {}
+        div class="alert alert-info" style="margin-top:1rem" {
+            "Pull mail from Gmail, Fastmail, or any IMAP/POP3 provider. "
+            "Messages are decrypted (if PGP) and stored in the local mailbox. "
+            "Gmail/Fastmail require an " strong { "App Password" } " — not your regular password."
+        }
+        div class="form-card" {
+            div class="form-card-header" { "Add Fetch Account" }
+            div class="form-card-body" {
+                form hx-post="/fetch"
+                     hx-target="#fetch-accounts-table"
+                     hx-swap="outerHTML"
+                     "hx-on::after-request"="this.reset()"
+                {
+                    div class="form-row" {
+                        div class="form-group" {
+                            label for="protocol" { "Protocol" }
+                            select id="protocol" name="protocol" required {
+                                option value="imap" { "IMAP" }
+                                option value="pop3" { "POP3" }
+                            }
+                        }
+                        div class="form-group" {
+                            label for="host" { "Server Host" }
+                            input type="text" id="host" name="host"
+                                  placeholder="imap.gmail.com" required;
+                        }
+                        div class="form-group" {
+                            label for="port" { "Port" }
+                            input type="number" id="port" name="port"
+                                  placeholder="993" min="1" max="65535" required;
+                        }
+                        div class="form-group" {
+                            label for="tls" { "TLS" }
+                            input type="checkbox" id="tls" name="tls" checked;
+                        }
+                        div class="form-group" {
+                            label for="username" { "Username" }
+                            input type="email" id="username" name="username"
+                                  placeholder="you@gmail.com" required;
+                        }
+                        div class="form-group" {
+                            label for="password" { "Password / App Password" }
+                            input type="password" id="password" name="password" required;
+                        }
+                        div class="form-group" {
+                            label for="local_recipient" { "Deliver to (local address)" }
+                            input type="email" id="local_recipient" name="local_recipient"
+                                  placeholder="alice@yourdomain.com" required;
+                        }
+                        div class="form-group" {
+                            label for="imap_mailbox" { "IMAP Mailbox (IMAP only)" }
+                            input type="text" id="imap_mailbox" name="imap_mailbox"
+                                  placeholder="INBOX" value="INBOX";
+                        }
+                        div class="form-group" {
+                            label for="poll_interval_secs" { "Poll Interval (s)" }
+                            input type="number" id="poll_interval_secs" name="poll_interval_secs"
+                                  placeholder="300" value="300" min="60" required;
+                        }
+                        div class="form-group" {
+                            label for="batch_size" { "Batch Size" }
+                            input type="number" id="batch_size" name="batch_size"
+                                  placeholder="50" value="50" min="1" max="500" required;
+                            p class="form-hint" { "Max messages per poll" }
+                        }
+                        div class="form-group" style="justify-content:flex-end" {
+                            button type="submit" class="btn btn-primary" { "Add Account" }
+                        }
+                    }
+                }
+            }
+        }
+        h4 class="section-heading" style="margin-top:1.5rem" { "Provider quick reference" }
+        div class="config-grid" {
+            div class="card" {
+                p class="card-label" { "Gmail (IMAP)" }
+                dl class="config-dl" {
+                    dt { "Host" } dd { code { "imap.gmail.com" } }
+                    dt { "Port" } dd { code { "993" } }
+                    dt { "TLS" } dd { code { "yes" } }
+                    dt { "Auth" } dd { "App Password (myaccount.google.com → Security → App Passwords)" }
+                }
+            }
+            div class="card" {
+                p class="card-label" { "Gmail (POP3)" }
+                dl class="config-dl" {
+                    dt { "Host" } dd { code { "pop.gmail.com" } }
+                    dt { "Port" } dd { code { "995" } }
+                    dt { "TLS" } dd { code { "yes" } }
+                    dt { "Auth" } dd { "App Password + enable POP3 in Gmail settings" }
+                }
+            }
+            div class="card" {
+                p class="card-label" { "Fastmail (IMAP)" }
+                dl class="config-dl" {
+                    dt { "Host" } dd { code { "imap.fastmail.com" } }
+                    dt { "Port" } dd { code { "993" } }
+                    dt { "TLS" } dd { code { "yes" } }
+                    dt { "Auth" } dd { "App Password (Settings → Privacy & Security → App Passwords)" }
+                }
+            }
+            div class="card" {
+                p class="card-label" { "Fastmail (POP3)" }
+                dl class="config-dl" {
+                    dt { "Host" } dd { code { "pop.fastmail.com" } }
+                    dt { "Port" } dd { code { "995" } }
+                    dt { "TLS" } dd { code { "yes" } }
+                    dt { "Auth" } dd { "App Password (same as IMAP)" }
+                }
+            }
+        }
+        (fetch_accounts_table(accounts))
+    };
+    layout("Fetch Accounts", content)
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────

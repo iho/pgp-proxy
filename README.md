@@ -2,14 +2,15 @@
 
 A self-hosted, standalone email server with transparent PGP encryption/decryption, written in Rust. No Postfix, Exim, or any external MTA required.
 
-It runs four services in a single binary:
+It runs five services in a single binary:
 
 | Service | Default port | Purpose |
 |---|---|---|
 | Outbound SMTP | 2587 | Accepts mail from apps/clients, encrypts, queues for delivery |
 | Inbound SMTP | 2525 | Accepts mail from the internet, decrypts PGP, stores |
 | POP3 | 1100 | Serves stored mail to clients (Thunderbird, etc.) |
-| Web UI | 8080 | Admin interface for keys, policies, users, queue, logs |
+| Web UI | 8080 | Admin interface for keys, policies, users, queue, fetch, logs |
+| Fetch poller | — | Background IMAP/POP3 client; pulls from Gmail, Fastmail, etc. |
 
 ---
 
@@ -43,7 +44,7 @@ Your app / mail client
    → deliver encrypted message
 ```
 
-### Receiving (inbound)
+### Receiving (inbound via MX)
 
 ```
 Internet sender
@@ -64,13 +65,34 @@ Internet sender
 └──────────────────────┘
 ```
 
+### Receiving (fetch from Gmail / Fastmail / any IMAP or POP3 provider)
+
+```
+Gmail / Fastmail / any provider
+        │  IMAP port 993  or  POP3 port 995
+        ▼
+┌──────────────────────┐
+│   Fetch poller       │  1. Connects with TLS using configured credentials
+│   (background task)  │  2. Fetches only unseen / not-yet-downloaded messages
+│                      │  3. Deduplicates via UID / UIDL (never re-fetches)
+│   PGP engine         │  4. Decrypts PGP content (if encrypted + key exists)
+│   Mailbox storage    │  5. Stores in SQLite mailbox for local_recipient
+└──────────────────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   POP3 server        │  Client connects, authenticates,
+│   (port 1100)        │  fetches messages (Thunderbird, etc.)
+└──────────────────────┘
+```
+
 ---
 
 ## Architecture
 
 ```
 src/
-├── main.rs            — spawns all server tasks + queue processor
+├── main.rs            — spawns all server tasks, queue processor, fetch poller
 ├── config.rs          — config loading (file + env vars)
 ├── db.rs              — SQLite init, schema creation
 ├── error.rs           — AppError type
@@ -81,6 +103,12 @@ src/
 ├── mailbox.rs         — inbound message storage and retrieval
 ├── policy.rs          — encryption policy rules + evaluation
 ├── queue.rs           — delivery queue: enqueue, retry, backoff, status
+├── fetch/
+│   ├── mod.rs         — FetchedMessage shared type
+│   ├── account_store.rs — fetch account + seen-message CRUD (SQLite)
+│   ├── imap_client.rs — async IMAP client (TLS, UID SEARCH UNSEEN, UID FETCH)
+│   ├── pop3_client.rs — async POP3 client (TLS + plain, UIDL dedup)
+│   └── poller.rs      — background polling loop; injects into local mailbox
 ├── smtp/
 │   ├── server.rs      — outbound SMTP state machine (port 2587)
 │   │                    + inbound SMTP state machine (port 2525)
@@ -106,6 +134,8 @@ src/
 | `policies` | Encryption rules (sender/recipient pattern → action) |
 | `smtp_logs` | Outbound SMTP transaction log |
 | `delivery_queue` | Outbound delivery queue with retry state |
+| `fetch_accounts` | IMAP/POP3 accounts to pull from, with last-fetch status |
+| `seen_messages` | Dedup table: UID/UIDL per account to avoid re-fetching |
 
 ---
 
@@ -166,6 +196,10 @@ password = "app-password"
 listen_addr = "0.0.0.0:1100"   # set to 0.0.0.0:110 in production (needs root/CAP_NET_BIND_SERVICE)
 enabled     = true
 
+[fetch]
+enabled            = true
+poll_interval_secs = 300   # global default; each account can override
+
 [web]
 listen_addr = "0.0.0.0:8080"
 
@@ -185,6 +219,8 @@ PGP_PROXY__RELAY__TLS=true
 PGP_PROXY__RELAY__USERNAME=apikey
 PGP_PROXY__RELAY__PASSWORD=SG.xxxxx
 PGP_PROXY__POP3__ENABLED=false
+PGP_PROXY__FETCH__ENABLED=false
+PGP_PROXY__FETCH__POLL_INTERVAL_SECS=600
 PGP_PROXY__DATABASE__URL=sqlite:///var/lib/pgp-proxy/pgp_proxy.db
 ```
 
@@ -284,6 +320,50 @@ Then check `http://localhost:8080/mailbox` or fetch via POP3.
 
 ---
 
+## Pulling mail from Gmail, Fastmail, or any IMAP/POP3 provider
+
+The fetch poller connects outbound to remote mail providers and pulls messages into the local mailbox. This is an alternative to inbound SMTP when you don't control the MX records for an address (e.g. your `@gmail.com` or `@fastmail.com` address).
+
+### Quick setup
+
+1. Open `http://localhost:8080/fetch`
+2. Generate an **App Password** at your provider (see table below — your regular password won't work with 2FA enabled)
+3. Fill in the form and click **Add Account**
+4. The poller fetches unseen messages on the configured interval, runs PGP decryption if applicable, and stores them in the local mailbox
+
+### Provider reference
+
+| Provider | Protocol | Host | Port | Notes |
+|---|---|---|---|---|
+| Gmail | IMAP | `imap.gmail.com` | 993 | Enable IMAP in Gmail settings; use an App Password |
+| Gmail | POP3 | `pop.gmail.com` | 995 | Enable POP3 in Gmail settings; use an App Password |
+| Fastmail | IMAP | `imap.fastmail.com` | 993 | Use an App Password from Settings → Privacy & Security |
+| Fastmail | POP3 | `pop.fastmail.com` | 995 | Use same App Password as IMAP |
+
+All connections use implicit TLS. STARTTLS (ports 143/110) is not yet supported for the fetch client.
+
+### How deduplication works
+
+- **IMAP:** fetches only messages matching `UID SEARCH UNSEEN`; UIDs are recorded in `seen_messages` so they are never re-fetched even if later marked read on the server
+- **POP3:** uses `UIDL` to get server-assigned unique IDs; messages are never deleted from the remote server (`DELE` is never sent)
+
+### Fetch account fields
+
+| Field | Description |
+|---|---|
+| Protocol | `imap` or `pop3` |
+| Host | Remote server hostname |
+| Port | 993 (IMAP+TLS) or 995 (POP3+TLS) |
+| TLS | Should be enabled for all public providers |
+| Username | Usually your full email address |
+| Password | App Password (not your login password) |
+| Deliver to | Local recipient address (must exist in `/users`) |
+| IMAP Mailbox | Folder to poll — default `INBOX` |
+| Poll Interval | Seconds between polls — minimum 60, default 300 |
+| Batch Size | Max messages downloaded per poll — default 50 |
+
+---
+
 ## Web UI
 
 | Page | URL | Description |
@@ -295,6 +375,7 @@ Then check `http://localhost:8080/mailbox` or fetch via POP3.
 | Users | `/users` | Local user accounts (POP3 login) |
 | Mailbox | `/mailbox` | Admin view of all stored messages |
 | Queue | `/queue` | Delivery queue: pending, delivered, and failed entries |
+| Fetch | `/fetch` | IMAP/POP3 fetch accounts; Poll Now button |
 | Logs | `/logs` | Outbound SMTP transaction log (auto-refreshes every 5 s) |
 | Config | `/config` | Current configuration (read-only) |
 
@@ -345,6 +426,8 @@ All outbound messages are forwarded to the configured relay server using `lettre
 - STARTTLS on the **outbound submission port** (2587) is not implemented — use a local loopback or VPN to protect submission traffic
 - No SASL authentication on the submission port — restrict access with firewall rules
 - Direct delivery does not perform a full TLS handshake after STARTTLS; servers that mandate TLS will reject the connection — use relay mode in that case
+- Fetch client supports implicit TLS only (ports 993/995); STARTTLS on ports 143/110 is not yet supported
+- Fetch account passwords are stored in plaintext in the SQLite database — secure the database file with filesystem permissions
 
 ---
 

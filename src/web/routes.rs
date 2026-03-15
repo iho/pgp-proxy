@@ -1,3 +1,4 @@
+use crate::fetch::account_store;
 use crate::keys;
 use crate::mailbox;
 use crate::policy;
@@ -21,6 +22,7 @@ use crate::config::Config;
 pub struct AppState {
     pub pool: Arc<SqlitePool>,
     pub config: Arc<Config>,
+    pub fetch_trigger: tokio::sync::mpsc::Sender<()>,
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -293,6 +295,99 @@ pub async fn delete_queue_entry(
         Ok(_) => (StatusCode::OK, html! {}).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_markup(&e.to_string())).into_response(),
     }
+}
+
+// ── Fetch Accounts ────────────────────────────────────────────────────────────
+
+pub async fn fetch_accounts_page(State(state): State<AppState>) -> impl IntoResponse {
+    let accounts = account_store::list_accounts(state.pool.as_ref())
+        .await
+        .unwrap_or_default();
+    templates::fetch_accounts_page(&accounts)
+}
+
+#[derive(Deserialize)]
+pub struct AddFetchAccountForm {
+    pub protocol: String,
+    pub host: String,
+    pub port: i64,
+    pub tls: Option<String>,
+    pub username: String,
+    pub password: String,
+    pub local_recipient: String,
+    pub imap_mailbox: String,
+    pub poll_interval_secs: i64,
+    pub batch_size: i64,
+}
+
+pub async fn add_fetch_account(
+    State(state): State<AppState>,
+    Form(form): Form<AddFetchAccountForm>,
+) -> impl IntoResponse {
+    let valid_protocols = ["imap", "pop3"];
+    if !valid_protocols.contains(&form.protocol.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            err_markup(&format!("Invalid protocol: {}", form.protocol)),
+        )
+            .into_response();
+    }
+
+    let tls = form.tls.as_deref() == Some("on") || form.tls.as_deref() == Some("true");
+
+    match account_store::add_account(
+        state.pool.as_ref(),
+        &form.protocol,
+        &form.host,
+        form.port,
+        tls,
+        &form.username,
+        &form.password,
+        &form.local_recipient,
+        &form.imap_mailbox,
+        form.poll_interval_secs,
+        form.batch_size,
+    )
+    .await
+    {
+        Ok(_) => {
+            let accounts = account_store::list_accounts(state.pool.as_ref())
+                .await
+                .unwrap_or_default();
+            (StatusCode::OK, templates::fetch_accounts_table(&accounts)).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, err_markup(&e.to_string())).into_response(),
+    }
+}
+
+pub async fn delete_fetch_account(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match account_store::delete_account(state.pool.as_ref(), &id).await {
+        Ok(_) => (StatusCode::OK, html! {}).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_markup(&e.to_string())).into_response(),
+    }
+}
+
+pub async fn toggle_fetch_account(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match account_store::toggle_account(state.pool.as_ref(), &id).await {
+        Ok(_) => {
+            let accounts = account_store::list_accounts(state.pool.as_ref())
+                .await
+                .unwrap_or_default();
+            (StatusCode::OK, templates::fetch_accounts_table(&accounts)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_markup(&e.to_string())).into_response(),
+    }
+}
+
+pub async fn trigger_fetch_poll(State(state): State<AppState>) -> impl IntoResponse {
+    state.fetch_trigger.try_send(()).ok();
+    (StatusCode::OK, html! { span { "Poll triggered." } }).into_response()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

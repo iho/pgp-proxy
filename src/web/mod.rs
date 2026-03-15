@@ -11,8 +11,12 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use crate::config::Config;
 
-pub fn build_router(pool: Arc<SqlitePool>, config: Arc<Config>) -> Router {
-    let state = AppState { pool, config };
+pub fn build_router(
+    pool: Arc<SqlitePool>,
+    config: Arc<Config>,
+    fetch_trigger: tokio::sync::mpsc::Sender<()>,
+) -> Router {
+    let state = AppState { pool, config, fetch_trigger };
 
     Router::new()
         .route("/", get(routes::dashboard))
@@ -35,5 +39,10 @@ pub fn build_router(pool: Arc<SqlitePool>, config: Arc<Config>) -> Router {
         .route("/queue", get(routes::queue_page))
         .route("/queue/partial", get(routes::queue_partial))
         .route("/queue/:id", delete(routes::delete_queue_entry))
+        .route("/fetch", get(routes::fetch_accounts_page))
+        .route("/fetch", post(routes::add_fetch_account))
+        .route("/fetch/:id", delete(routes::delete_fetch_account))
+        .route("/fetch/:id/toggle", post(routes::toggle_fetch_account))
+        .route("/fetch/poll", post(routes::trigger_fetch_poll))
         .with_state(state)
 }
