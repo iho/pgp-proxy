@@ -43,11 +43,18 @@ assert_not_contains() {
 # Send lines to host:port over a plain TCP connection and capture the response.
 # \r and \n in input are interpreted as CR and LF (printf %b semantics).
 # Works on Linux and macOS via bash /dev/tcp (no external nc dependency).
+# Uses bash's built-in read -t to avoid a dependency on GNU coreutils timeout.
 tcp_dialog() {
     local host="$1" port="$2" input="$3" timeout_s="${4:-3}"
-    timeout "$timeout_s" bash -c \
-        "exec 3<>/dev/tcp/\$1/\$2; printf '%b' \"\$3\" >&3; cat <&3; exec 3>&-" \
-        _ "$host" "$port" "$input" 2>/dev/null || true
+    (
+        exec 3<>/dev/tcp/"$host"/"$port" 2>/dev/null || exit 0
+        printf '%b' "$input" >&3
+        local line
+        while IFS= read -r -t "$timeout_s" line <&3 2>/dev/null; do
+            printf '%s\n' "$line"
+        done
+        exec 3>&-
+    ) 2>/dev/null || true
 }
 
 wait_for_port() {
